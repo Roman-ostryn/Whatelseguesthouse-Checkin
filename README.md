@@ -22,7 +22,7 @@ Copy `.env.example` → `.env` on the hotel PC only. Never commit `.env`.
 | 6 | **Done** | MRZ paste fill |
 | 7 | **Done** | Given name + check-out **required** |
 | 8 | **Done** | Guest link `/g/<token>` + auto SIBA; hotel `/links` |
-| 9 | Next | Auto-email links **15 days** before from eviivo (needs public URL + Resend) |
+| 9 | **Done** | Auto-email links from eviivo (today → N days before; default 15) |
 
 ### Run (dev)
 
@@ -53,9 +53,14 @@ python build_exe.py
 1. Joao opens **/links**, creates a link (guest, email, check-in/out).  
 2. Guest opens the URL, fills (or pastes MRZ), submits.  
 3. Foreign guests → **auto SIBA**. Portuguese → save only.  
-4. **15 days before:** target delay in `.env` as `CHECKIN_LINK_DAYS_BEFORE=15`.  
-5. For guests off the hotel PC set `CHECKIN_PUBLIC_BASE_URL` to a public HTTPS URL (ngrok / Railway / VPS).  
-6. Optional email: `RESEND_API_KEY` + `RESEND_FROM`, then **Email link** on `/links`.
+4. **Auto email (Joao):** set eviivo + Resend + `CHECKIN_PUBLIC_BASE_URL`.  
+   Job emails Whatelse stays with check-in from **today through** `CHECKIN_LINK_DAYS_BEFORE` (default 15), once per booking.  
+   Manual **/links** create/email/remove still works.  
+5. **Daily cron:** set `CRON_SECRET`, then GET/POST once a day (Lisbon morning):  
+   `https://YOUR-app.up.railway.app/cron/send-due-links?secret=YOUR_CRON_SECRET`  
+   Or use header `Authorization: Bearer YOUR_CRON_SECRET`.  
+   Staff can also click **Run auto emails now** on `/links`.  
+6. CLI: `python send_due.py` (add `--dry-run` to preview).
 
 ### INE
 

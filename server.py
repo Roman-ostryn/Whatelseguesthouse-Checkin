@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,12 +12,15 @@ from urllib.parse import parse_qs, urlparse
 import links
 import store
 from config import (
+    cron_authorized,
+    cron_secret,
     ine_ready,
     ine_settings,
     link_mail_ready,
     link_public_ready,
     link_settings,
 )
+from eviivo import eviivo_ready
 from fields import COMMON_COUNTRIES, DOC_TYPES, FIELD_SPEC
 from ine import (
     MonthReport,
@@ -27,6 +31,7 @@ from ine import (
 )
 from link_mail import send_checkin_link
 from mrz import MrzError, parse_mrz
+from send_due import result_message, run_due_emails
 from siba import SibaError, is_foreign_guest, send_checkin
 
 # Local default; Railway sets PORT and we listen on 0.0.0.0.
@@ -51,6 +56,22 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/links":
             self._html(200, _links_page(message="", ok=True))
+            return
+        if path in {"/internal/cron/send-due-links", "/cron/send-due-links"}:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            auth = self.headers.get("Authorization") or self.headers.get("X-Cron-Secret") or ""
+            secret = (params.get("secret") or [""])[-1]
+            if not cron_authorized(auth, secret):
+                self._html(401, _shell("Unauthorized", "<p>Missing or invalid CRON_SECRET.</p>"))
+                return
+            dry = (params.get("dry_run") or [""])[-1].lower() in {"1", "true", "yes"}
+            result = run_due_emails(dry_run=dry)
+            raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if result.get("ok") else 500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
             return
         if path.startswith("/g/"):
             token = path[len("/g/") :].strip("/")
@@ -260,6 +281,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self._html(200, _links_page(message="Guest link removed.", ok=True))
             else:
                 self._html(400, _links_page(message="Link not found.", ok=False))
+            return
+        if path == "/links/auto-run":
+            result = run_due_emails(dry_run=False)
+            self._html(
+                200 if result.get("ok") else 400,
+                _links_page(message=result_message(result), ok=bool(result.get("ok"))),
+            )
+            return
+        if path in {"/internal/cron/send-due-links", "/cron/send-due-links"}:
+            auth = self.headers.get("Authorization") or self.headers.get("X-Cron-Secret") or ""
+            if not cron_authorized(auth, str(data.get("secret") or "")):
+                self._html(401, _shell("Unauthorized", "<p>Missing or invalid CRON_SECRET.</p>"))
+                return
+            result = run_due_emails(dry_run=str(data.get("dry_run") or "") in {"1", "true", "yes"})
+            raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
+            self.send_response(200 if result.get("ok") else 500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
             return
         if path == "/ine/mark":
             parsed = parse_year_month(str(data.get("month") or ""))
@@ -1189,13 +1230,33 @@ def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> s
     banner = ""
     if message:
         banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
-    hints = f'<p class="hint">Guest link target: <strong>{days} days</strong> before check-in (Joao).</p>'
+    hints = f'<p class="hint">Guest link target: <strong>{days} days</strong> before check-in (Joao). Auto job emails stays from today through that window (covers late bookings).</p>'
     if pub:
         hints += f'<p class="hint">{_esc(pub)}</p>'
     else:
         hints += f'<p class="hint">Public base: {_esc(str(cfg["public_base_url"]))}</p>'
     if mail:
         hints += f'<p class="hint">{_esc(mail)}</p>'
+    evi = eviivo_ready()
+    if evi:
+        hints += f'<p class="hint">{_esc(evi)}</p>'
+    else:
+        hints += '<p class="hint">eviivo: ready for automatic guest-link emails.</p>'
+    if not cron_secret():
+        hints += '<p class="hint">Set CRON_SECRET in .env so Railway/cron can call /cron/send-due-links.</p>'
+
+    last = links.last_auto_run()
+    if last:
+        summary = (
+            f"Last auto run {_esc(str(last.get('at') or ''))}: "
+            f"{len(last.get('sent') or [])} emailed, "
+            f"{len(last.get('skipped') or [])} skipped, "
+            f"{len(last.get('no_email') or [])} no email, "
+            f"{len(last.get('failed') or [])} failed."
+        )
+        if last.get("error"):
+            summary += f" Error: {_esc(str(last.get('error')))}"
+        hints += f'<p class="hint">{summary}</p>'
 
     rows_html: list[str] = []
     for row in links.list_links(80):
@@ -1258,6 +1319,11 @@ def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> s
           </div>
         </div>
         <button type="submit">Create guest link</button>
+      </form>
+      <form method="post" action="/links/auto-run" style="margin-top:1rem;"
+        onsubmit="return confirm('Run automatic eviivo emails for stays within the next {_esc(str(days))} days?');">
+        <button class="secondary inline" type="submit">Run auto emails now</button>
+        <p class="hint">Pulls Whatelse bookings from eviivo and emails links not yet sent. Same job as the daily cron.</p>
       </form>
       <h2 style="font-size:1.05rem;margin:1.4rem 0 0.5rem">Links</h2>
       {items}

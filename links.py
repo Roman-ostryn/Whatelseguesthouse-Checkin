@@ -14,6 +14,7 @@ LISBON = ZoneInfo("Europe/Lisbon")
 ROOT = app_root()
 DATA_DIR = ROOT / "data"
 PATH = DATA_DIR / "guest_links.json"
+AUTO_RUN_PATH = DATA_DIR / "auto_link_run.json"
 _LOCK = threading.Lock()
 
 
@@ -99,6 +100,38 @@ def list_links(limit: int = 100) -> list[dict]:
         rows = list((_read().get("by_reference") or {}).values())
     rows.sort(key=lambda r: str(r.get("checkin") or ""), reverse=True)
     return rows[: max(0, limit)]
+
+
+def save_auto_run(result: dict) -> None:
+    """Remember the last automatic email job for the /links screen."""
+    payload = {
+        "at": datetime.now(LISBON).isoformat(timespec="seconds"),
+        "ok": bool(result.get("ok")),
+        "error": str(result.get("error") or ""),
+        "sent": list(result.get("sent") or []),
+        "skipped": list(result.get("skipped") or []),
+        "failed": list(result.get("failed") or []),
+        "no_email": list(result.get("no_email") or []),
+        "dry_run": bool(result.get("dry_run")),
+        "days_before": result.get("days_before"),
+        "today": result.get("today"),
+    }
+    with _LOCK:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = AUTO_RUN_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(AUTO_RUN_PATH)
+
+
+def last_auto_run() -> dict | None:
+    with _LOCK:
+        if not AUTO_RUN_PATH.is_file():
+            return None
+        try:
+            raw = json.loads(AUTO_RUN_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    return raw if isinstance(raw, dict) else None
 
 
 def delete_link(token: str = "", reference: str = "") -> bool:

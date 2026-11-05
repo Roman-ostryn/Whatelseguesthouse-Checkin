@@ -116,3 +116,20 @@ def link_mail_ready() -> str:
     if not cfg["resend_api_key"] or not cfg["resend_from"]:
         return "Add RESEND_API_KEY and RESEND_FROM to .env to email guest links."
     return ""
+
+
+def cron_secret() -> str:
+    load_settings()
+    return str(os.getenv("CRON_SECRET", "")).strip()
+
+
+def cron_authorized(header_value: str = "", query_secret: str = "") -> bool:
+    """True when CRON_SECRET is set and the request presents it."""
+    expected = cron_secret()
+    if not expected:
+        return False
+    auth = str(header_value or "").strip()
+    if auth.lower().startswith("bearer "):
+        auth = auth[7:].strip()
+    candidate = auth or str(query_secret or "").strip()
+    return bool(candidate) and candidate == expected
