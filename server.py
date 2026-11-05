@@ -7,7 +7,7 @@ import json
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import links
 import store
@@ -55,7 +55,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._html(200, _list_page(store.list_checkins()))
             return
         if path == "/links":
-            self._html(200, _links_page(message="", ok=True))
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            filt = str((params.get("filter") or ["all"])[-1] or "all").lower()
+            older = str((params.get("older") or [""])[-1]).lower() in {"1", "true", "yes"}
+            q = str((params.get("q") or [""])[-1] or "").strip()
+            self._html(
+                200,
+                _links_page(message="", ok=True, filter_key=filt, show_older=older, search=q),
+            )
             return
         if path in {"/internal/cron/send-due-links", "/cron/send-due-links"}:
             params = parse_qs(parsed.query, keep_blank_values=True)
@@ -602,6 +609,89 @@ def _shell(title: str, body: str) -> str:
       background: none;
       border: 0;
       border-radius: 0;
+    }}
+    .tabs {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin: 0.75rem 0 0.5rem;
+    }}
+    .tabs a {{
+      display: inline-block;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      text-decoration: none;
+      color: var(--ink);
+      font-size: 0.85rem;
+      font-weight: 600;
+      background: #fff;
+    }}
+    .tabs a.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }}
+    .status-pill {{
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      vertical-align: middle;
+    }}
+    .status-ready {{ background: #ffedd5; color: #9a3412; }}
+    .status-sent {{ background: #dbeafe; color: #1e40af; }}
+    .status-filled {{ background: #d1fae5; color: #065f46; }}
+    .date-group {{
+      margin: 1rem 0 0.35rem;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .list-row.compact {{
+      padding: 0.45rem 0;
+      align-items: center;
+    }}
+    .list-row.compact .meta {{
+      font-size: 0.92rem;
+    }}
+    .list-row.compact .meta .subline {{
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }}
+    .toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin: 0.5rem 0 0.75rem;
+    }}
+    .toolbar form {{
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      flex: 1;
+      min-width: 12rem;
+      margin: 0;
+      padding: 0;
+      background: none;
+      border: 0;
+    }}
+    .toolbar input[type="search"] {{
+      margin: 0;
+      padding: 0.4rem 0.6rem;
+    }}
+    .toolbar button {{
+      margin: 0;
+      width: auto;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.85rem;
     }}
     dl {{ margin: 0; }}
     dt {{ font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }}
@@ -1222,11 +1312,26 @@ def _guest_done_page(link: dict, *, already: bool, siba_note: str = "") -> str:
     return _shell("Check-in received", body)
 
 
-def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> str:
+def _links_page(
+    *,
+    message: str = "",
+    ok: bool = True,
+    highlight: str = "",
+    filter_key: str = "all",
+    show_older: bool = False,
+    search: str = "",
+) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     cfg = link_settings()
     days = int(cfg["days_before"])
     pub = link_public_ready()
     mail = link_mail_ready()
+    today = datetime.now(ZoneInfo("Europe/Lisbon")).date().isoformat()
+    filt = filter_key if filter_key in {"all", "ready", "sent", "filled"} else "all"
+    q = (search or "").strip().lower()
+
     banner = ""
     if message:
         banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
@@ -1258,42 +1363,128 @@ def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> s
             summary += f" Error: {_esc(str(last.get('error')))}"
         hints += f'<p class="hint">{summary}</p>'
 
-    rows_html: list[str] = []
-    for row in links.list_links(80):
-        token = str(row.get("token") or "")
-        url = links.public_url(token, str(cfg["public_base_url"]))
-        status = "filled" if row.get("filled_at") else ("sent" if row.get("sent_at") else "ready")
-        mark = " <strong>(new)</strong>" if token == highlight else ""
-        actions = []
-        if not row.get("filled_at") and row.get("email"):
+    all_rows = links.list_links(500)
+    counts = {"all": 0, "ready": 0, "sent": 0, "filled": 0}
+    active_rows: list[dict] = []
+    for row in all_rows:
+        status = links.link_status(row)
+        checkout = str(row.get("checkout") or "")
+        past = bool(checkout and checkout < today)
+        if past and not show_older:
+            continue
+        counts["all"] += 1
+        counts[status] = counts.get(status, 0) + 1
+        active_rows.append(row)
+
+    filtered: list[dict] = []
+    for row in active_rows:
+        status = links.link_status(row)
+        if filt != "all" and status != filt:
+            continue
+        if q:
+            blob = " ".join(
+                str(row.get(k) or "")
+                for k in ("guest", "email", "reference", "checkin", "checkout")
+            ).lower()
+            if q not in blob:
+                continue
+        filtered.append(row)
+
+    def list_query(*, filter: str | None = None, older: bool | None = None, q_text: str | None = None) -> str:
+        use_filter = filter if filter is not None else filt
+        use_older = show_older if older is None else older
+        use_q = search if q_text is None else q_text
+        parts = [f"filter={use_filter}"]
+        if use_older:
+            parts.append("older=1")
+        if use_q:
+            parts.append(f"q={quote(str(use_q))}")
+        return "/links?" + "&".join(parts)
+
+    tabs = []
+    for key, label in (
+        ("all", "All"),
+        ("ready", "Ready"),
+        ("sent", "Sent"),
+        ("filled", "Filled"),
+    ):
+        cls = "active" if filt == key else ""
+        tabs.append(
+            f'<a class="{cls}" href="{list_query(filter=key)}">{label} ({counts.get(key, 0)})</a>'
+        )
+
+    older_toggle = (
+        f'<a href="{list_query(older=False)}">Hide past check-outs</a>'
+        if show_older
+        else f'<a href="{list_query(older=True)}">Show older (past check-out)</a>'
+    )
+
+    groups: dict[str, list[dict]] = {}
+    for row in filtered:
+        checkin = str(row.get("checkin") or "") or "(no date)"
+        groups.setdefault(checkin, []).append(row)
+
+    blocks: list[str] = []
+    for checkin in sorted(groups.keys()):
+        label = f"Arriving {checkin}" if checkin != "(no date)" else "No check-in date"
+        blocks.append(f'<div class="date-group">{_esc(label)} · {len(groups[checkin])}</div>')
+        blocks.append('<ul class="clean">')
+        for row in groups[checkin]:
+            token = str(row.get("token") or "")
+            url = links.public_url(token, str(cfg["public_base_url"]))
+            status = links.link_status(row)
+            mark = ' <strong>(new)</strong>' if token == highlight else ""
+            guest = str(row.get("guest") or "(guest)")
+            checkout = str(row.get("checkout") or "")
+            email = str(row.get("email") or "")
+            ref = str(row.get("reference") or "")
+            actions = []
+            actions.append(f'<a class="compact" href="{_esc(url)}" target="_blank" rel="noopener">Open</a>')
+            if status != "filled" and email:
+                actions.append(
+                    f'<form method="post" action="/links/email">'
+                    f'<input type="hidden" name="token" value="{_esc(token)}" />'
+                    f'<button class="secondary compact" type="submit">Email</button>'
+                    f"</form>"
+                )
             actions.append(
-                f'<form method="post" action="/links/email">'
+                f'<form method="post" action="/links/remove" '
+                f'onsubmit="return confirm(\'Remove this guest link?\');">'
                 f'<input type="hidden" name="token" value="{_esc(token)}" />'
-                f'<button class="secondary compact" type="submit">Email</button>'
+                f'<button class="danger compact" type="submit">Remove</button>'
                 f"</form>"
             )
-        actions.append(
-            f'<form method="post" action="/links/remove" '
-            f'onsubmit="return confirm(\'Remove this guest link?\');">'
-            f'<input type="hidden" name="token" value="{_esc(token)}" />'
-            f'<button class="danger compact" type="submit">Remove</button>'
-            f"</form>"
+            sub_bits = [f"{checkin} → {checkout}" if checkout else checkin]
+            if email:
+                sub_bits.append(email)
+            if ref:
+                sub_bits.append(ref)
+            blocks.append(
+                '<li class="list-row compact">'
+                '<div class="meta">'
+                f'<span class="status-pill status-{status}">{status}</span> '
+                f"<strong>{_esc(guest)}</strong>{mark}"
+                f'<div class="subline">{_esc(" · ".join(sub_bits))}</div>'
+                "</div>"
+                f'<div class="actions">{"".join(actions)}</div>'
+                "</li>"
+            )
+        blocks.append("</ul>")
+
+    if filtered:
+        items = "".join(blocks)
+    elif all_rows and not active_rows and not show_older:
+        items = (
+            '<p class="note">No current links (past check-outs are hidden). '
+            f"{older_toggle}</p>"
         )
-        rows_html.append(
-            '<li class="list-row">'
-            '<div class="meta">'
-            f"{_esc(str(row.get('guest') or '(guest)'))} — "
-            f"{_esc(str(row.get('checkin') or ''))} → {_esc(str(row.get('checkout') or ''))} — "
-            f"{_esc(status)}{mark}<br/>"
-            f"<code>{_esc(url)}</code>"
-            "</div>"
-            f'<div class="actions">{"".join(actions)}</div>'
-            "</li>"
-        )
-    items = (
-        '<ul class="clean">' + "".join(rows_html) + "</ul>"
-        if rows_html
-        else '<p class="note">No guest links yet.</p>'
+    elif all_rows:
+        items = '<p class="note">No links match this filter.</p>'
+    else:
+        items = '<p class="note">No guest links yet.</p>'
+
+    older_hidden = (
+        '<input type="hidden" name="older" value="1" />' if show_older else ""
     )
 
     body = f"""
@@ -1325,7 +1516,17 @@ def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> s
         <button class="secondary inline" type="submit">Run auto emails now</button>
         <p class="hint">Pulls Whatelse bookings from eviivo and emails links not yet sent. Same job as the daily cron.</p>
       </form>
-      <h2 style="font-size:1.05rem;margin:1.4rem 0 0.5rem">Links</h2>
+      <h2 style="font-size:1.05rem;margin:1.4rem 0 0.35rem">Links</h2>
+      <div class="tabs">{"".join(tabs)}</div>
+      <div class="toolbar">
+        <form method="get" action="/links">
+          <input type="hidden" name="filter" value="{_esc(filt)}" />
+          {older_hidden}
+          <input type="search" name="q" value="{_esc(search)}" placeholder="Search name, email, ref" />
+          <button class="secondary" type="submit">Search</button>
+        </form>
+        <span class="hint" style="margin:0">{older_toggle} · showing {len(filtered)} of {counts.get('all', 0)}</span>
+      </div>
       {items}
       <p class="note"><a href="/list">Hotel list</a> · <a href="/checkin">Staff check-in</a> · <a href="/ine">INE</a></p>
     </div>

@@ -95,11 +95,25 @@ def mark_filled(
         return True
 
 
-def list_links(limit: int = 100) -> list[dict]:
+def list_links(limit: int = 500) -> list[dict]:
     with _LOCK:
         rows = list((_read().get("by_reference") or {}).values())
-    rows.sort(key=lambda r: str(r.get("checkin") or ""), reverse=True)
+    # Nearest arrivals first, then guest name
+    rows.sort(
+        key=lambda r: (
+            str(r.get("checkin") or "9999-99-99"),
+            str(r.get("guest") or "").lower(),
+        )
+    )
     return rows[: max(0, limit)]
+
+
+def link_status(row: dict) -> str:
+    if row.get("filled_at"):
+        return "filled"
+    if row.get("sent_at"):
+        return "sent"
+    return "ready"
 
 
 def save_auto_run(result: dict) -> None:
