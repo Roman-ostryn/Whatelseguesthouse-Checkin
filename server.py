@@ -57,11 +57,10 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/links":
             params = parse_qs(parsed.query, keep_blank_values=True)
             filt = str((params.get("filter") or ["all"])[-1] or "all").lower()
-            older = str((params.get("older") or [""])[-1]).lower() in {"1", "true", "yes"}
             q = str((params.get("q") or [""])[-1] or "").strip()
             self._html(
                 200,
-                _links_page(message="", ok=True, filter_key=filt, show_older=older, search=q),
+                _links_page(message="", ok=True, filter_key=filt, search=q),
             )
             return
         if path in {"/internal/cron/send-due-links", "/cron/send-due-links"}:
@@ -1318,7 +1317,6 @@ def _links_page(
     ok: bool = True,
     highlight: str = "",
     filter_key: str = "all",
-    show_older: bool = False,
     search: str = "",
 ) -> str:
     from datetime import datetime
@@ -1367,11 +1365,10 @@ def _links_page(
     counts = {"all": 0, "ready": 0, "sent": 0, "filled": 0}
     active_rows: list[dict] = []
     for row in all_rows:
-        status = links.link_status(row)
         checkout = str(row.get("checkout") or "")
-        past = bool(checkout and checkout < today)
-        if past and not show_older:
+        if checkout and checkout < today:
             continue
+        status = links.link_status(row)
         counts["all"] += 1
         counts[status] = counts.get(status, 0) + 1
         active_rows.append(row)
@@ -1390,13 +1387,10 @@ def _links_page(
                 continue
         filtered.append(row)
 
-    def list_query(*, filter: str | None = None, older: bool | None = None, q_text: str | None = None) -> str:
+    def list_query(*, filter: str | None = None, q_text: str | None = None) -> str:
         use_filter = filter if filter is not None else filt
-        use_older = show_older if older is None else older
         use_q = search if q_text is None else q_text
         parts = [f"filter={use_filter}"]
-        if use_older:
-            parts.append("older=1")
         if use_q:
             parts.append(f"q={quote(str(use_q))}")
         return "/links?" + "&".join(parts)
@@ -1413,12 +1407,6 @@ def _links_page(
             f'<a class="{cls}" href="{list_query(filter=key)}">{label} ({counts.get(key, 0)})</a>'
         )
 
-    older_toggle = (
-        f'<a href="{list_query(older=False)}">Hide past check-outs</a>'
-        if show_older
-        else f'<a href="{list_query(older=True)}">Show older (past check-out)</a>'
-    )
-
     groups: dict[str, list[dict]] = {}
     for row in filtered:
         checkin = str(row.get("checkin") or "") or "(no date)"
@@ -1431,15 +1419,13 @@ def _links_page(
         blocks.append('<ul class="clean">')
         for row in groups[checkin]:
             token = str(row.get("token") or "")
-            url = links.public_url(token, str(cfg["public_base_url"]))
             status = links.link_status(row)
-            mark = ' <strong>(new)</strong>' if token == highlight else ""
+            mark = " <strong>(new)</strong>" if token == highlight else ""
             guest = str(row.get("guest") or "(guest)")
             checkout = str(row.get("checkout") or "")
             email = str(row.get("email") or "")
             ref = str(row.get("reference") or "")
             actions = []
-            actions.append(f'<a class="compact" href="{_esc(url)}" target="_blank" rel="noopener">Open</a>')
             if status != "filled" and email:
                 actions.append(
                     f'<form method="post" action="/links/email">'
@@ -1473,19 +1459,12 @@ def _links_page(
 
     if filtered:
         items = "".join(blocks)
-    elif all_rows and not active_rows and not show_older:
-        items = (
-            '<p class="note">No current links (past check-outs are hidden). '
-            f"{older_toggle}</p>"
-        )
+    elif all_rows and not active_rows:
+        items = '<p class="note">No current links (past check-outs are hidden).</p>'
     elif all_rows:
         items = '<p class="note">No links match this filter.</p>'
     else:
         items = '<p class="note">No guest links yet.</p>'
-
-    older_hidden = (
-        '<input type="hidden" name="older" value="1" />' if show_older else ""
-    )
 
     body = f"""
     <p class="sub">Create a guest check-in link (like CheckIn Scan). Guest fills online; foreign guests auto-send to SIBA.</p>
@@ -1521,11 +1500,10 @@ def _links_page(
       <div class="toolbar">
         <form method="get" action="/links">
           <input type="hidden" name="filter" value="{_esc(filt)}" />
-          {older_hidden}
           <input type="search" name="q" value="{_esc(search)}" placeholder="Search name, email, ref" />
           <button class="secondary" type="submit">Search</button>
         </form>
-        <span class="hint" style="margin:0">{older_toggle} · showing {len(filtered)} of {counts.get('all', 0)}</span>
+        <span class="hint" style="margin:0">showing {len(filtered)}</span>
       </div>
       {items}
       <p class="note"><a href="/list">Hotel list</a> · <a href="/checkin">Staff check-in</a> · <a href="/ine">INE</a></p>
