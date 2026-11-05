@@ -181,7 +181,6 @@ Please complete your online check-in before arrival — it only takes a few minu
 </td>
 </tr>
 </table>
-<p style="margin:14px 0 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#6B7378;">If the button does not open, copy this link:<br><a href="{link}" style="color:#2F6F6A;word-break:break-all;">{link}</a></p>
 </td>
 </tr>
 <tr>
@@ -206,7 +205,6 @@ Complete o check-in online antes da chegada — demora apenas alguns minutos e p
 </td>
 </tr>
 </table>
-<p style="margin:14px 0 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#6B7378;">Se o botão não abrir, copie esta ligação:<br><a href="{link}" style="color:#2F6F6A;word-break:break-all;">{link}</a></p>
 </td>
 </tr>
 <tr>
