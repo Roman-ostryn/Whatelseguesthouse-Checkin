@@ -61,6 +61,39 @@ def get_checkin(checkin_id: str) -> dict | None:
     return None
 
 
+def update_checkin(checkin_id: str, fields: dict[str, str]) -> dict | None:
+    """Replace guest fields; keep id, SIBA/INE flags, and source metadata."""
+    key = str(checkin_id or "").strip()
+    if not key:
+        return None
+    now = datetime.now(LISBON).isoformat(timespec="seconds")
+    with _LOCK:
+        data = _read()
+        for row in data.get("checkins") or []:
+            if str(row.get("id") or "") != key:
+                continue
+            row["fields"] = dict(fields)
+            row["updated_at"] = now
+            _write(data)
+            return dict(row)
+    return None
+
+
+def delete_checkin(checkin_id: str) -> bool:
+    key = str(checkin_id or "").strip()
+    if not key:
+        return False
+    with _LOCK:
+        data = _read()
+        rows = list(data.get("checkins") or [])
+        kept = [row for row in rows if str(row.get("id") or "") != key]
+        if len(kept) == len(rows):
+            return False
+        data["checkins"] = kept
+        _write(data)
+        return True
+
+
 def count_checkins() -> int:
     with _LOCK:
         return len(_read().get("checkins") or [])

@@ -101,6 +101,26 @@ def list_links(limit: int = 100) -> list[dict]:
     return rows[: max(0, limit)]
 
 
+def delete_link(token: str = "", reference: str = "") -> bool:
+    """Remove a guest link by token or booking reference."""
+    with _LOCK:
+        data = _read()
+        ref = str(reference or "").strip()
+        tok = str(token or "").strip()
+        if tok and not ref:
+            ref = str(data["by_token"].get(tok) or "")
+        if not ref:
+            return False
+        record = data["by_reference"].pop(ref, None)
+        if record is None:
+            return False
+        tok = str(record.get("token") or tok)
+        if tok:
+            data["by_token"].pop(tok, None)
+        _write(data)
+        return True
+
+
 def due_for_link_day(checkin: str, today: date | None = None, *, days_before: int = 15) -> bool:
     """True when check-in is exactly `days_before` days from today (Lisbon)."""
     day = today or datetime.now(LISBON).date()

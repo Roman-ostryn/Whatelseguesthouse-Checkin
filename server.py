@@ -78,6 +78,14 @@ class _Handler(BaseHTTPRequestHandler):
             report = build_month_report(store.list_checkins(limit=10_000), year, month)
             self._csv(report)
             return
+        if path.startswith("/checkin/") and path.endswith("/edit"):
+            checkin_id = path[len("/checkin/") : -len("/edit")].strip("/")
+            record = store.get_checkin(checkin_id)
+            if record is None:
+                self._html(404, _shell("Not found", "<p>Check-in not found.</p>"))
+                return
+            self._html(200, _form_page(_fields_for_form(dict(record.get("fields") or {})), edit_id=checkin_id, record=record))
+            return
         if path.startswith("/checkin/"):
             record = store.get_checkin(path[len("/checkin/") :].strip("/"))
             if record is None:
@@ -146,13 +154,73 @@ class _Handler(BaseHTTPRequestHandler):
             print(f"Guest link filled {token} -> {record['id']} siba={siba_note}", flush=True)
             self._html(200, _guest_done_page(links.find_token(token) or link, already=False, siba_note=siba_note))
             return
-        if path.endswith("/send-siba"):
+        if path.startswith("/checkin/") and path.endswith("/send-siba"):
             checkin_id = path[len("/checkin/") : -len("/send-siba")].strip("/")
             record, message, ok = _send_siba(checkin_id)
             if record is None:
                 self._html(404, _shell("Not found", "<p>Check-in not found.</p>"))
                 return
             self._html(200 if ok else 400, _detail_page(record, message=message, ok=ok))
+            return
+        if path.startswith("/checkin/") and path.endswith("/remove"):
+            checkin_id = path[len("/checkin/") : -len("/remove")].strip("/")
+            if store.delete_checkin(checkin_id):
+                self._html(
+                    200,
+                    _list_page(store.list_checkins(), message="Check-in removed.", ok=True),
+                )
+            else:
+                self._html(
+                    404,
+                    _list_page(store.list_checkins(), message="Check-in not found.", ok=False),
+                )
+            return
+        if path.startswith("/checkin/") and path.endswith("/edit/mrz"):
+            checkin_id = path[len("/checkin/") : -len("/edit/mrz")].strip("/")
+            record = store.get_checkin(checkin_id)
+            if record is None:
+                self._html(404, _shell("Not found", "<p>Check-in not found.</p>"))
+                return
+            values, err, ok_msg = _apply_mrz(data)
+            status = 400 if err and not ok_msg else 200
+            self._html(
+                status,
+                _form_page(
+                    values,
+                    error=err,
+                    ok_message=ok_msg,
+                    mrz_text=str(data.get("mrz") or ""),
+                    edit_id=checkin_id,
+                    record=record,
+                ),
+            )
+            return
+        if path.startswith("/checkin/") and path.endswith("/edit"):
+            checkin_id = path[len("/checkin/") : -len("/edit")].strip("/")
+            existing = store.get_checkin(checkin_id)
+            if existing is None:
+                self._html(404, _shell("Not found", "<p>Check-in not found.</p>"))
+                return
+            cleaned, errors = _validate(data)
+            if errors:
+                self._html(
+                    400,
+                    _form_page(
+                        data,
+                        error=" ".join(errors),
+                        edit_id=checkin_id,
+                        record=existing,
+                    ),
+                )
+                return
+            record = store.update_checkin(checkin_id, cleaned)
+            if record is None:
+                self._html(404, _shell("Not found", "<p>Check-in not found.</p>"))
+                return
+            note = "Check-in updated."
+            if record.get("siba_sent_at"):
+                note += " Local data only — AIMA was not changed. Send to SIBA again only if needed."
+            self._html(200, _detail_page(record, message=note, ok=True))
             return
         if path == "/links/create":
             stay = {
@@ -185,6 +253,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._html(200, _links_page(message=f"Email sent to {record.get('email')}.", ok=True))
             except Exception as exc:
                 self._html(400, _links_page(message=str(exc), ok=False))
+            return
+        if path == "/links/remove":
+            token = str(data.get("token") or "").strip()
+            if links.delete_link(token=token):
+                self._html(200, _links_page(message="Guest link removed.", ok=True))
+            else:
+                self._html(400, _links_page(message="Link not found.", ok=False))
             return
         if path == "/ine/mark":
             parsed = parse_year_month(str(data.get("month") or ""))
@@ -413,7 +488,32 @@ def _shell(title: str, body: str) -> str:
       width: auto;
       padding: 0.55rem 0.9rem;
     }}
-    button:hover {{ filter: brightness(0.95); }}
+    button.compact {{
+      margin-top: 0;
+      width: auto;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border-radius: 6px;
+      white-space: nowrap;
+    }}
+    button.danger {{
+      background: #b91c1c;
+    }}
+    a.compact {{
+      display: inline-block;
+      margin-top: 0;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border-radius: 6px;
+      white-space: nowrap;
+      text-decoration: none;
+      color: #fff;
+      background: #44403c;
+      line-height: 1.2;
+    }}
+    button:hover, a.compact:hover {{ filter: brightness(0.95); }}
     textarea.mrz {{
       font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
       font-size: 0.85rem;
@@ -428,7 +528,40 @@ def _shell(title: str, body: str) -> str:
       margin-bottom: 1rem;
     }}
     ul {{ padding-left: 1.1rem; }}
+    ul.clean {{ list-style: none; padding: 0; margin: 0; }}
     li {{ margin: 0.45rem 0; }}
+    .list-row {{
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin: 0;
+      padding: 0.65rem 0;
+      border-bottom: 1px solid var(--line);
+    }}
+    .list-row:last-child {{ border-bottom: 0; }}
+    .list-row .meta {{ flex: 1; min-width: 0; word-break: break-word; }}
+    .list-row .meta code {{
+      display: inline-block;
+      max-width: 100%;
+      font-size: 0.78rem;
+      word-break: break-all;
+    }}
+    .list-row .actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      justify-content: flex-end;
+      flex-shrink: 0;
+    }}
+    .list-row .actions form {{
+      display: inline;
+      margin: 0;
+      padding: 0;
+      background: none;
+      border: 0;
+      border-radius: 0;
+    }}
     dl {{ margin: 0; }}
     dt {{ font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }}
     dd {{ margin: 0.15rem 0 0; font-weight: 600; }}
@@ -489,24 +622,62 @@ def _apply_mrz(data: dict[str, str]) -> tuple[dict[str, str], str, str]:
     return values, "", f"MRZ applied — check the fields, then set check-in/out dates.{warn}"
 
 
+def _fields_for_form(fields: dict[str, str]) -> dict[str, str]:
+    """Expand stored ICAO codes into form select + Other fields."""
+    values = {str(k): str(v or "") for k, v in fields.items()}
+    for key in ("nationality", "document_country", "residence_country"):
+        code = str(values.get(key) or "").upper()
+        if code and code not in _KNOWN_COUNTRIES:
+            values[key] = "OTHER"
+            values[f"{key}_other"] = code
+        elif code in _KNOWN_COUNTRIES:
+            values[f"{key}_other"] = values.get(f"{key}_other") or ""
+    return values
+
+
 def _form_page(
     values: dict[str, str],
     error: str = "",
     *,
     ok_message: str = "",
     mrz_text: str = "",
+    edit_id: str = "",
+    record: dict | None = None,
 ) -> str:
     def v(name: str) -> str:
         return _esc(values.get(name) or "")
 
+    editing = bool(edit_id)
+    mrz_action = f"/checkin/{_esc(edit_id)}/edit/mrz" if editing else "/checkin/mrz"
+    form_action = f"/checkin/{_esc(edit_id)}/edit" if editing else "/checkin"
+    submit_label = "Save changes" if editing else "Submit check-in"
+    title = "Edit check-in" if editing else "Check-in — Whatelse Guest House"
+    sub = (
+        "Update guest details. Saving changes the local record only."
+        if editing
+        else "Whatelse Guest House — staff check-in. Paste MRZ or type fields, then save."
+    )
+    siba_note = ""
+    if editing and record and record.get("siba_sent_at"):
+        siba_note = (
+            '<div class="error">SIBA was already sent for this guest. '
+            "Editing updates the hotel list only — it does not change AIMA. "
+            "Use Send to SIBA again only if a new boletim is required.</div>"
+        )
+    cancel = (
+        f'<p class="note"><a href="/checkin/{_esc(edit_id)}">Cancel</a> · <a href="/list">Hotel list</a></p>'
+        if editing
+        else ""
+    )
     err = f'<div class="error">{_esc(error)}</div>' if error else ""
     ok = f'<div class="ok">{_esc(ok_message)}</div>' if ok_message else ""
     body = f"""
-    <p class="sub">Whatelse Guest House — staff check-in. Paste MRZ or type fields, then save.</p>
+    <p class="sub">{_esc(sub)}</p>
+    {siba_note}
     {err}
     {ok}
     <div class="mrz-box">
-      <form method="post" action="/checkin/mrz">
+      <form method="post" action="{mrz_action}">
         <label for="mrz">Passport / ID MRZ <span class="opt">optional shortcut</span></label>
         <textarea id="mrz" name="mrz" class="mrz" maxlength="200" placeholder="Paste the 2 lines from the bottom of the passport (or 3 lines from an ID card)">{_esc(mrz_text)}</textarea>
         <p class="hint">Does not save yet — only fills the form. Check-in/out dates stay manual.</p>
@@ -520,7 +691,7 @@ def _form_page(
         <button class="secondary inline" type="submit">Fill form from MRZ</button>
       </form>
     </div>
-    <form method="post" action="/checkin" novalidate>
+    <form method="post" action="{form_action}" novalidate>
       <div class="row two">
         <div>
           <label for="surname">Surname (Apelido)</label>
@@ -611,12 +782,13 @@ def _form_page(
       <label for="notes">Notes for the hotel <span class="opt">optional</span></label>
       <textarea id="notes" name="notes" maxlength="500">{v("notes")}</textarea>
 
-      <button type="submit">Submit check-in</button>
+      <button type="submit">{_esc(submit_label)}</button>
+      {cancel}
       <p class="note">Saved on this PC. Send foreign guests to SIBA from the list; guest links at <a href="/links">/links</a>; INE at <a href="/ine">/ine</a>.
       Hotel list: <a href="/list">/list</a></p>
     </form>
     """
-    return _shell("Check-in — Whatelse Guest House", body)
+    return _shell(title, body)
 
 
 def _thanks_page(record: dict) -> str:
@@ -642,11 +814,14 @@ def _thanks_page(record: dict) -> str:
     return _shell("Check-in received", body)
 
 
-def _list_page(rows: list[dict]) -> str:
+def _list_page(rows: list[dict], *, message: str = "", ok: bool = True) -> str:
+    banner = ""
+    if message:
+        banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
     if not rows:
         items = "<p class=\"note\">No check-ins saved yet.</p>"
     else:
-        parts: list[str] = ["<ul>"]
+        parts: list[str] = ['<ul class="clean">']
         for row in rows:
             fields = dict(row.get("fields") or {})
             name = " ".join(
@@ -659,15 +834,25 @@ def _list_page(rows: list[dict]) -> str:
                 "SIBA pending" if is_foreign_guest(fields) else "PRT — no SIBA"
             )
             parts.append(
-                "<li>"
-                f"<a href=\"/checkin/{_esc(cid)}\">{_esc(name)}</a>"
+                '<li class="list-row">'
+                '<div class="meta">'
+                f'<a href="/checkin/{_esc(cid)}">{_esc(name)}</a>'
                 f" — check-in {_esc(checkin)} — {_esc(siba)} — saved {_esc(when)}"
+                "</div>"
+                '<div class="actions">'
+                f'<a class="compact" href="/checkin/{_esc(cid)}/edit">Edit</a>'
+                f'<form method="post" action="/checkin/{_esc(cid)}/remove" '
+                f'onsubmit="return confirm(\'Remove this check-in from the hotel list?\');">'
+                '<button class="danger compact" type="submit">Remove</button>'
+                "</form>"
+                "</div>"
                 "</li>"
             )
         parts.append("</ul>")
         items = "".join(parts)
     body = f"""
     <p class="sub">Hotel list ({store.count_checkins()}). Foreign guests can be sent to SIBA from each detail page.</p>
+    {banner}
     <div class="panel">
       {items}
       <p class="note"><a href="/checkin">New check-in</a> · <a href="/links">Guest links</a> · <a href="/ine">INE monthly report</a></p>
@@ -695,12 +880,21 @@ def _detail_page(record: dict, *, message: str = "", ok: bool = True) -> str:
     banner = ""
     if message:
         banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
+    cid = str(record.get("id") or "")
     body = f"""
     <p class="sub">Saved check-in detail (hotel).</p>
     {banner}
     <div class="panel">
       <dl>{"".join(rows)}</dl>
       {_siba_panel(record)}
+      <div class="actions" style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:0.35rem;">
+        <a class="compact" href="/checkin/{_esc(cid)}/edit">Edit</a>
+        <form method="post" action="/checkin/{_esc(cid)}/remove"
+          onsubmit="return confirm('Remove this check-in from the hotel list?');"
+          style="display:inline;margin:0;padding:0;background:none;border:0;">
+          <button class="danger compact" type="submit">Remove</button>
+        </form>
+      </div>
       <p class="note"><a href="/list">Back to list</a> · <a href="/checkin">New check-in</a> · <a href="/ine">INE month</a></p>
     </div>
     """
@@ -1009,22 +1203,37 @@ def _links_page(*, message: str = "", ok: bool = True, highlight: str = "") -> s
         url = links.public_url(token, str(cfg["public_base_url"]))
         status = "filled" if row.get("filled_at") else ("sent" if row.get("sent_at") else "ready")
         mark = " <strong>(new)</strong>" if token == highlight else ""
-        email_btn = ""
+        actions = []
         if not row.get("filled_at") and row.get("email"):
-            email_btn = f"""
-            <form method="post" action="/links/email" style="display:inline">
-              <input type="hidden" name="token" value="{_esc(token)}" />
-              <button class="secondary inline" type="submit">Email link</button>
-            </form>"""
+            actions.append(
+                f'<form method="post" action="/links/email">'
+                f'<input type="hidden" name="token" value="{_esc(token)}" />'
+                f'<button class="secondary compact" type="submit">Email</button>'
+                f"</form>"
+            )
+        actions.append(
+            f'<form method="post" action="/links/remove" '
+            f'onsubmit="return confirm(\'Remove this guest link?\');">'
+            f'<input type="hidden" name="token" value="{_esc(token)}" />'
+            f'<button class="danger compact" type="submit">Remove</button>'
+            f"</form>"
+        )
         rows_html.append(
-            "<li>"
+            '<li class="list-row">'
+            '<div class="meta">'
             f"{_esc(str(row.get('guest') or '(guest)'))} — "
             f"{_esc(str(row.get('checkin') or ''))} → {_esc(str(row.get('checkout') or ''))} — "
             f"{_esc(status)}{mark}<br/>"
-            f"<code>{_esc(url)}</code> {email_btn}"
+            f"<code>{_esc(url)}</code>"
+            "</div>"
+            f'<div class="actions">{"".join(actions)}</div>'
             "</li>"
         )
-    items = "<ul>" + "".join(rows_html) + "</ul>" if rows_html else "<p class=\"note\">No guest links yet.</p>"
+    items = (
+        '<ul class="clean">' + "".join(rows_html) + "</ul>"
+        if rows_html
+        else '<p class="note">No guest links yet.</p>'
+    )
 
     body = f"""
     <p class="sub">Create a guest check-in link (like CheckIn Scan). Guest fills online; foreign guests auto-send to SIBA.</p>
