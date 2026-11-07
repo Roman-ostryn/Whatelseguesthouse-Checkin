@@ -20,7 +20,7 @@ from config import (
     link_public_ready,
     link_settings,
 )
-from eviivo import eviivo_ready
+from eviivo import EviivoError, eviivo_ready, load_month_stays
 from fields import COMMON_COUNTRIES, DOC_TYPES, FIELD_SPEC
 from ine import (
     MonthReport,
@@ -97,12 +97,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/ine":
             year, month, message, ok = _ine_month_from_query(parsed.query)
-            report = build_month_report(store.list_checkins(limit=10_000), year, month)
+            report, extra, extra_ok = _ine_report(year, month)
+            if extra:
+                message = extra if not message else f"{message} {extra}"
+                ok = ok and extra_ok
             self._html(200, _ine_page(report, message=message, ok=ok))
             return
         if path == "/ine.csv":
             year, month, _msg, _ok = _ine_month_from_query(parsed.query)
-            report = build_month_report(store.list_checkins(limit=10_000), year, month)
+            report, _extra, _extra_ok = _ine_report(year, month)
             self._csv(report)
             return
         if path.startswith("/checkin/") and path.endswith("/edit"):
@@ -310,17 +313,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/ine/mark":
             parsed = parse_year_month(str(data.get("month") or ""))
-            if parsed is None:
-                y, m = default_report_month()
-                report = build_month_report(store.list_checkins(limit=10_000), y, m)
-                self._html(400, _ine_page(report, message="Invalid month.", ok=False))
-                return
-            year, month = parsed
-            report = build_month_report(store.list_checkins(limit=10_000), year, month)
-            n = store.mark_ine_included(report.guest_ids, year=year, month=month)
-            msg = f"Marked {n} guest(s) as included in INE {report.label}."
-            report = build_month_report(store.list_checkins(limit=10_000), year, month)
-            self._html(200, _ine_page(report, message=msg, ok=True))
+            year, month = parsed or default_report_month()
+            report, _extra, _ok = _ine_report(year, month)
+            self._html(
+                200,
+                _ine_page(
+                    report,
+                    message="INE uses all eviivo reservations. Nothing extra to mark.",
+                    ok=True,
+                ),
+            )
             return
         if path not in {"/", "/checkin"}:
             self._html(404, _shell("Not found", "<p>Page not found.</p>"))
@@ -1031,6 +1033,29 @@ def _detail_page(record: dict, *, message: str = "", ok: bool = True) -> str:
     return _shell("Check-in detail", body)
 
 
+def _ine_report(year: int, month: int) -> tuple[MonthReport, str, bool]:
+    """Quadro 1 from every Whatelse eviivo stay. Check-in form fills a missing country."""
+    try:
+        stays = load_month_stays(year, month)
+    except EviivoError as exc:
+        empty = build_month_report([], year, month)
+        return empty, str(exc), False
+    by_ref: dict[str, str] = {}
+    for row in store.list_checkins(limit=10_000):
+        ref = str(row.get("booking_reference") or "").strip()
+        fields = dict(row.get("fields") or {})
+        country = str(fields.get("residence_country") or "").strip().upper()
+        if ref and country:
+            by_ref[ref] = country
+    for stay in stays:
+        if stay.get("country"):
+            continue
+        filled = by_ref.get(str(stay.get("reference") or ""))
+        if filled:
+            stay["country"] = filled
+    return build_month_report(stays, year, month), "", True
+
+
 def _ine_month_from_query(query: str) -> tuple[int, int, str, bool]:
     params = parse_qs(query, keep_blank_values=True)
     raw = (params.get("month") or [""])[-1]
@@ -1058,7 +1083,7 @@ def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str
 
     if report.no_movement:
         table = (
-            '<p class="note">No guest nights in this month from saved check-ins. '
+            '<p class="note">No guest nights in this month from eviivo. '
             "In WebInq, mark <strong>sem movimento de hóspedes</strong> if that is correct "
             "(still submit by day 10).</p>"
         )
@@ -1109,7 +1134,7 @@ def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str
 
     month_value = report.label
     body = f"""
-    <p class="sub">IPHH Quadro 1 from local check-ins. Copy into WebInq (deadline: day 10 of the next month). Not auto-sent.</p>
+    <p class="sub">IPHH Quadro 1 from <strong>all Whatelse eviivo reservations</strong> (adults + children). AIMA still uses only the check-in form. Copy into WebInq by day 10. Not auto-sent.</p>
     {banner}
     <div class="panel">
       <form method="get" action="/ine">
@@ -1122,12 +1147,7 @@ def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str
         · <a href="/ine.csv?month={_esc(month_value)}">Download CSV</a></p>
       {table}
       {skip}
-      <p class="note">Quadro 2 (capacity / revenue) is not in this app — fill in WebInq from eviivo / accounts.</p>
-      <form method="post" action="/ine/mark">
-        <input type="hidden" name="month" value="{_esc(month_value)}" />
-        <button class="secondary" type="submit">Mark these guests as used for INE {_esc(month_value)}</button>
-        <p class="hint">Optional hotel reminder only — does not submit to INE.</p>
-      </form>
+      <p class="note">Guests with no country in eviivo are grouped as <strong>Sem país</strong>. If they filled the check-in form, that country is used instead. Quadro 2 (capacity / revenue) is still filled in WebInq from accounts.</p>
       <p class="note"><a href="/list">Hotel list</a> · <a href="/checkin">New check-in</a></p>
     </div>
     """

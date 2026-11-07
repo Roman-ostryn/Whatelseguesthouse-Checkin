@@ -49,20 +49,36 @@ def eviivo_settings() -> dict[str, str]:
     }
 
 
+def load_month_stays(year: int, month: int) -> list[dict]:
+    """Whatelse bookings that overlap one calendar month (for INE)."""
+    from calendar import monthrange
+
+    start = date(year, month, 1)
+    # Include stays that checked in before the month but slept inside it.
+    lookback = start - timedelta(days=40)
+    last_day = monthrange(year, month)[1]
+    end = date(year, month, last_day)
+    return _load_range(lookback, end)
+
+
 def load_upcoming_stays(*, days_ahead: int = 20) -> list[dict]:
     """Whatelse stays with check-in from today through days_ahead (Lisbon)."""
+    today = datetime.now(LISBON).date()
+    last = today + timedelta(days=max(0, int(days_ahead)))
+    return _load_range(today, last)
+
+
+def _load_range(start: date, end: date) -> list[dict]:
     cfg = eviivo_settings()
     problem = eviivo_ready()
     if problem:
         raise EviivoError(problem)
-    today = datetime.now(LISBON).date()
-    last = today + timedelta(days=max(0, int(days_ahead)))
     token = _token(cfg)
     stays: list[dict] = []
     seen: set[str] = set()
-    for start, end in _windows(today, last):
+    for window_start, window_end in _windows(start, end):
         query = urllib.parse.urlencode(
-            {"checkInFrom": start.isoformat(), "checkInTo": end.isoformat()}
+            {"checkInFrom": window_start.isoformat(), "checkInTo": window_end.isoformat()}
         )
         path = f"/pms/v2/property/{cfg['property_id']}/bookings?{query}"
         status, body = _get(cfg["api_base"], path, token, cfg["client_id"])
@@ -122,6 +138,21 @@ def _parse_stay(item: object, property_id: str, property_name: str) -> dict | No
     reference = str(booking.get("BookingReference") or "").strip()
     if not reference or not checkin:
         return None
+    address = primary.get("Address") if isinstance(primary, dict) else None
+    country = ""
+    if isinstance(address, dict):
+        country = str(address.get("CountryCode") or "").strip().upper()
+    try:
+        adults = int(booking.get("NumberOfAdults") or 0)
+    except (TypeError, ValueError):
+        adults = 0
+    try:
+        children = int(booking.get("NumberOfChildren") or 0)
+    except (TypeError, ValueError):
+        children = 0
+    guests_count = adults + children
+    if guests_count < 1:
+        guests_count = 1
     return {
         "reference": reference,
         "property_id": property_id,
@@ -130,6 +161,8 @@ def _parse_stay(item: object, property_id: str, property_name: str) -> dict | No
         "email": email,
         "checkin": checkin,
         "checkout": checkout,
+        "country": country,
+        "guests": guests_count,
     }
 
 

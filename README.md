@@ -7,7 +7,7 @@ Replaces **CheckIn Scan**. Staff or guest fills check-in; foreign guests go to S
 1. Staff form and/or **guest link** (MRZ paste optional).
 2. Store stays locally.
 3. **SIBA / AIMA** — send Boletim (staff button, or **auto** after guest link submit).
-4. **INE** — monthly IPHH Quadro 1 from stays (copy into WebInq).
+4. **INE** — monthly IPHH Quadro 1 from **all Whatelse eviivo stays** (copy into WebInq). AIMA stays on the check-in form only.
 
 ## Credentials
 
@@ -64,7 +64,7 @@ python build_exe.py
 
 ### INE
 
-Open `/ine`, pick month, copy Quadro 1 into WebInq by day 10. Not auto-submitted.
+Open `/ine`, pick month. The table is every Whatelse eviivo reservation in that month (not only guests who filled the check-in form). Copy Quadro 1 into WebInq by day 10. Not auto-submitted. AIMA / SIBA is unchanged: only the check-in form.
 
 ## Official links
 

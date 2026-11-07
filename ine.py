@@ -1,4 +1,4 @@
-"""Monthly INE IPHH (WebInq) Quadro 1 summary from local check-ins.
+"""Monthly INE IPHH (WebInq) Quadro 1 summary from all Whatelse eviivo stays.
 
 INE has no simple SIBA-like send API for IPHH. This builds the guest/dormidas
 table Joao copies into https://webinq.ine.pt (due by day 10 of the next month).
@@ -140,6 +140,8 @@ def country_label(code: str) -> str:
     key = str(code or "").strip().upper()
     if not key:
         return "(missing residence country)"
+    if key == "ZZZ":
+        return "Sem país (eviivo)"
     return _ICAO_PT.get(key, f"Other — {key}")
 
 
@@ -171,37 +173,55 @@ def _parse_date(value: str) -> date | None:
         return None
 
 
-def build_month_report(checkins: list[dict], year: int, month: int) -> MonthReport:
-    """Aggregate Quadro 1 columns by residence country for one month."""
+def build_month_report(stays: list[dict], year: int, month: int) -> MonthReport:
+    """Aggregate Quadro 1 by residence country for one month.
+
+    Each stay is one eviivo booking. `guests` is adults + children (at least 1).
+    Country comes from eviivo, or from the check-in form when that was filled in.
+    """
     buckets: dict[str, list[int]] = {}
     guest_ids: list[str] = []
     skipped: list[str] = []
+    missing_country = 0
 
-    for row in checkins:
+    for row in stays:
+        ref = str(row.get("reference") or row.get("id") or "")
         fields = dict(row.get("fields") or {})
-        cid = str(row.get("id") or "")
-        checkin = _parse_date(str(fields.get("checkin_date") or ""))
-        checkout_raw = str(fields.get("checkout_date") or "").strip()
-        checkout = _parse_date(checkout_raw) if checkout_raw else None
+        checkin = _parse_date(str(row.get("checkin") or fields.get("checkin_date") or ""))
+        checkout = _parse_date(str(row.get("checkout") or fields.get("checkout_date") or ""))
         if checkin is None:
-            skipped.append(f"{cid or '?'}: missing check-in date")
+            skipped.append(f"{ref or '?'}: missing check-in date")
             continue
         if checkout is None:
-            # One-night stay assumed if checkout missing
             checkout = checkin.fromordinal(checkin.toordinal() + 1)
 
         nights = nights_in_month(checkin, checkout, year, month)
         if nights <= 0:
             continue
 
-        code = str(fields.get("residence_country") or "").strip().upper() or "ZZZ"
-        entered = 1 if checkin.year == year and checkin.month == month else 0
+        try:
+            people = int(row.get("guests") or 1)
+        except (TypeError, ValueError):
+            people = 1
+        if people < 1:
+            people = 1
+
+        code = str(row.get("country") or fields.get("residence_country") or "").strip().upper()
+        if not code:
+            code = "ZZZ"
+            missing_country += people
+        entered = people if checkin.year == year and checkin.month == month else 0
         bucket = buckets.setdefault(code, [0, 0, 0])
         bucket[0] += entered
-        bucket[1] += 1
-        bucket[2] += nights
-        if cid:
-            guest_ids.append(cid)
+        bucket[1] += people
+        bucket[2] += nights * people
+        if ref:
+            guest_ids.append(ref)
+
+    if missing_country:
+        skipped.append(
+            f"{missing_country} guest(s) have no country in eviivo — shown as Sem país."
+        )
 
     rows: list[CountryRow] = []
     for code, (entered, slept, dormidas) in buckets.items():
@@ -215,7 +235,7 @@ def build_month_report(checkins: list[dict], year: int, month: int) -> MonthRepo
             )
         )
     # PRT first, then label
-    rows.sort(key=lambda r: (0 if r.code == "PRT" else 1, r.label.lower(), r.code))
+    rows.sort(key=lambda r: (0 if r.code == "PRT" else 2 if r.code == "ZZZ" else 1, r.label.lower(), r.code))
     return MonthReport(
         year=year,
         month=month,
