@@ -1068,6 +1068,30 @@ def _ine_month_from_query(query: str) -> tuple[int, int, str, bool]:
     return (*parsed, "", True)
 
 
+def _ine_month_links(year: int, month: int) -> str:
+    """Clickable months around today so the calendar widget is not required."""
+    from datetime import date
+
+    today = date.today()
+    # 6 months back through the current month.
+    cursor_year, cursor_month = today.year, today.month
+    months: list[tuple[int, int]] = []
+    for _ in range(7):
+        months.append((cursor_year, cursor_month))
+        cursor_month -= 1
+        if cursor_month == 0:
+            cursor_month = 12
+            cursor_year -= 1
+    months.reverse()
+    parts: list[str] = []
+    for y, m in months:
+        label = date(y, m, 1).strftime("%b %Y")
+        href = f"/ine?month={y:04d}-{m:02d}"
+        cls = "active" if (y, m) == (year, month) else ""
+        parts.append(f'<a class="{cls}" href="{href}">{_esc(label)}</a>')
+    return "".join(parts)
+
+
 def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str:
     cfg = ine_settings()
     ready = ine_ready()
@@ -1133,12 +1157,15 @@ def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str
         )
 
     month_value = report.label
+    month_links = _ine_month_links(report.year, report.month)
     body = f"""
     <p class="sub">IPHH Quadro 1 from <strong>all Whatelse eviivo reservations</strong> (adults + children). AIMA still uses only the check-in form. Copy into WebInq by day 10. Not auto-sent.</p>
     {banner}
     <div class="panel">
+      <p class="hint">Click a month. The first open can take up to a minute while eviivo loads.</p>
+      <div class="tabs">{month_links}</div>
       <form method="get" action="/ine">
-        <label for="month">Reference month</label>
+        <label for="month">Or pick another month</label>
         <input id="month" name="month" type="month" value="{_esc(month_value)}" required />
         <button type="submit">Show report</button>
       </form>
