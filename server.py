@@ -1068,28 +1068,46 @@ def _ine_month_from_query(query: str) -> tuple[int, int, str, bool]:
     return (*parsed, "", True)
 
 
-def _ine_month_links(year: int, month: int) -> str:
-    """Clickable months around today so the calendar widget is not required."""
+def _ine_month_choices() -> list[tuple[int, int, str]]:
+    """Recent months through the current one, oldest first."""
     from datetime import date
 
     today = date.today()
-    # 6 months back through the current month.
     cursor_year, cursor_month = today.year, today.month
-    months: list[tuple[int, int]] = []
-    for _ in range(7):
-        months.append((cursor_year, cursor_month))
+    months: list[tuple[int, int, str]] = []
+    for _ in range(12):
+        label = date(cursor_year, cursor_month, 1).strftime("%B %Y")
+        months.append((cursor_year, cursor_month, label))
         cursor_month -= 1
         if cursor_month == 0:
             cursor_month = 12
             cursor_year -= 1
     months.reverse()
+    return months
+
+
+def _ine_month_links(year: int, month: int) -> str:
+    """Clickable months. The browser calendar does not reload the report."""
     parts: list[str] = []
-    for y, m in months:
-        label = date(y, m, 1).strftime("%b %Y")
+    for y, m, label in _ine_month_choices():
         href = f"/ine?month={y:04d}-{m:02d}"
         cls = "active" if (y, m) == (year, month) else ""
         parts.append(f'<a class="{cls}" href="{href}">{_esc(label)}</a>')
     return "".join(parts)
+
+
+def _ine_month_select(year: int, month: int) -> str:
+    options: list[str] = []
+    for y, m, label in _ine_month_choices():
+        value = f"{y:04d}-{m:02d}"
+        selected = " selected" if (y, m) == (year, month) else ""
+        options.append(f'<option value="{value}"{selected}>{_esc(label)}</option>')
+    return (
+        '<select id="month" name="month" '
+        'onchange="if (this.value) location.href=\'/ine?month=\'+this.value">'
+        + "".join(options)
+        + "</select>"
+    )
 
 
 def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str:
@@ -1162,13 +1180,10 @@ def _ine_page(report: MonthReport, *, message: str = "", ok: bool = True) -> str
     <p class="sub">IPHH Quadro 1 from <strong>all Whatelse eviivo reservations</strong> (adults + children). AIMA still uses only the check-in form. Copy into WebInq by day 10. Not auto-sent.</p>
     {banner}
     <div class="panel">
-      <p class="hint">Click a month. The first open can take up to a minute while eviivo loads.</p>
+      <p class="hint">Choose a month. The report reloads for that month. The first open can take up to a minute.</p>
       <div class="tabs">{month_links}</div>
-      <form method="get" action="/ine">
-        <label for="month">Or pick another month</label>
-        <input id="month" name="month" type="month" value="{_esc(month_value)}" required />
-        <button type="submit">Show report</button>
-      </form>
+      <label for="month">Reference month</label>
+      {_ine_month_select(report.year, report.month)}
       <p class="hint">{login_hint}</p>
       <p class="note"><a href="{_esc(webinq)}" target="_blank" rel="noopener">Open WebInq</a>
         · <a href="/ine.csv?month={_esc(month_value)}">Download CSV</a></p>
