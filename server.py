@@ -1395,18 +1395,14 @@ def _links_page(
     banner = ""
     if message:
         banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
-    hints = f'<p class="hint">Guest link target: <strong>{days} days</strong> before check-in (Joao). Auto job emails stays from yesterday through that window, once per booking. A check-in from yesterday is still sent if no link went out yet.</p>'
+    hints = ""
     if pub:
         hints += f'<p class="hint">{_esc(pub)}</p>'
-    else:
-        hints += f'<p class="hint">Public base: {_esc(str(cfg["public_base_url"]))}</p>'
     if mail:
         hints += f'<p class="hint">{_esc(mail)}</p>'
     evi = eviivo_ready()
     if evi:
         hints += f'<p class="hint">{_esc(evi)}</p>'
-    else:
-        hints += '<p class="hint">eviivo: ready for automatic guest-link emails.</p>'
     if not cron_secret():
         hints += '<p class="hint">Set CRON_SECRET in .env so Railway/cron can call /cron/send-due-links.</p>'
 
