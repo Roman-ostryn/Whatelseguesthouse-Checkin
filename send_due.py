@@ -15,8 +15,9 @@ LISBON = ZoneInfo("Europe/Lisbon")
 
 def run_due_emails(*, dry_run: bool = False) -> dict:
     """
-    For Whatelse bookings with check-in from today through CHECKIN_LINK_DAYS_BEFORE:
-    create link (if needed) and email once. Covers the 15-day target and late bookings.
+    For Whatelse bookings with check-in from yesterday through CHECKIN_LINK_DAYS_BEFORE:
+    create link (if needed) and email once. Yesterday stays eligible so a booking
+    made after the last run of the day is still sent the next morning.
     """
     problems: list[str] = []
     for check in (eviivo_ready, link_public_ready, link_mail_ready):
@@ -42,7 +43,7 @@ def run_due_emails(*, dry_run: bool = False) -> dict:
     today = datetime.now(LISBON).date()
 
     try:
-        stays = load_upcoming_stays(days_ahead=max(days, 1) + 2)
+        stays = load_upcoming_stays(days_ahead=max(days, 1) + 2, days_back=1)
     except EviivoError as exc:
         result = {
             "ok": False,
@@ -135,7 +136,8 @@ def _within_window(checkin: str, today: date, days_before: int) -> bool:
         arrival = date.fromisoformat(str(checkin or "").strip())
     except ValueError:
         return False
-    if arrival < today:
+    # Yesterday stays in the window so the next morning still sends an unsent link.
+    if arrival < today - timedelta(days=1):
         return False
     return arrival <= today + timedelta(days=int(days_before))
 

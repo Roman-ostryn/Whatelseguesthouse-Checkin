@@ -1395,7 +1395,7 @@ def _links_page(
     banner = ""
     if message:
         banner = f'<div class="{"ok" if ok else "error"}">{_esc(message)}</div>'
-    hints = f'<p class="hint">Guest link target: <strong>{days} days</strong> before check-in (Joao). Auto job emails stays from today through that window (covers late bookings).</p>'
+    hints = f'<p class="hint">Guest link target: <strong>{days} days</strong> before check-in (Joao). Auto job emails stays from yesterday through that window, once per booking. A check-in from yesterday is still sent if no link went out yet.</p>'
     if pub:
         hints += f'<p class="hint">{_esc(pub)}</p>'
     else:

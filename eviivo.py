@@ -61,11 +61,12 @@ def load_month_stays(year: int, month: int) -> list[dict]:
     return _load_range(lookback, end)
 
 
-def load_upcoming_stays(*, days_ahead: int = 20) -> list[dict]:
-    """Whatelse stays with check-in from today through days_ahead (Lisbon)."""
+def load_upcoming_stays(*, days_ahead: int = 20, days_back: int = 0) -> list[dict]:
+    """Whatelse stays with check-in from today-days_back through days_ahead (Lisbon)."""
     today = datetime.now(LISBON).date()
+    start = today - timedelta(days=max(0, int(days_back)))
     last = today + timedelta(days=max(0, int(days_ahead)))
-    return _load_range(today, last)
+    return _load_range(start, last)
 
 
 def _load_range(start: date, end: date) -> list[dict]:

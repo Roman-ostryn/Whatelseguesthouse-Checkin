@@ -54,9 +54,10 @@ python build_exe.py
 2. Guest opens the URL, fills (or pastes MRZ), submits.  
 3. Foreign guests → **auto SIBA**. Portuguese → save only.  
 4. **Auto email (Joao):** set eviivo + Resend + `CHECKIN_PUBLIC_BASE_URL`.  
-   Job emails Whatelse stays with check-in from **today through** `CHECKIN_LINK_DAYS_BEFORE` (default 15), once per booking.  
+   Job emails Whatelse stays with check-in from **yesterday through** `CHECKIN_LINK_DAYS_BEFORE` (default 15), once per booking.  
+   A check-in from yesterday is still emailed when no link was sent yet.  
    Manual **/links** create/email/remove still works.  
-5. **Daily cron:** set `CRON_SECRET`, then GET/POST once a day (Lisbon morning):  
+5. **Cron:** set `CRON_SECRET`, then GET/POST at 08:00, 12:00, 16:00, and 20:00 Lisbon:  
    `https://YOUR-app.up.railway.app/cron/send-due-links?secret=YOUR_CRON_SECRET`  
    Or use header `Authorization: Bearer YOUR_CRON_SECRET`.  
    Staff can also click **Run auto emails now** on `/links`.  
