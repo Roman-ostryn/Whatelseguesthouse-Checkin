@@ -19,6 +19,7 @@ from config import (
     link_mail_ready,
     link_public_ready,
     link_settings,
+    siba_ready,
 )
 from eviivo import EviivoError, eviivo_ready, load_month_stays
 from fields import COMMON_COUNTRIES, DOC_TYPES, FIELD_SPEC
@@ -32,7 +33,7 @@ from ine import (
 from link_mail import send_checkin_link
 from mrz import MrzError, parse_mrz
 from send_due import result_message, run_due_emails
-from siba import SibaError, is_foreign_guest, send_checkin
+from siba import SibaError, entry_is_due, is_foreign_guest, send_checkin
 
 # Local default; Railway sets PORT and we listen on 0.0.0.0.
 HOST = str(os.getenv("HOST", "127.0.0.1")).strip() or "127.0.0.1"
@@ -71,7 +72,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._html(401, _shell("Unauthorized", "<p>Missing or invalid CRON_SECRET.</p>"))
                 return
             dry = (params.get("dry_run") or [""])[-1].lower() in {"1", "true", "yes"}
-            result = run_due_emails(dry_run=dry)
+            result = _run_due(dry_run=dry)
             raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
             self.send_response(200 if result.get("ok") else 500)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -292,10 +293,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._html(400, _links_page(message="Link not found.", ok=False))
             return
         if path == "/links/auto-run":
-            result = run_due_emails(dry_run=False)
+            result = _run_due(dry_run=False)
             self._html(
                 200 if result.get("ok") else 400,
-                _links_page(message=result_message(result), ok=bool(result.get("ok"))),
+                _links_page(message=_due_message(result), ok=bool(result.get("ok"))),
             )
             return
         if path in {"/internal/cron/send-due-links", "/cron/send-due-links"}:
@@ -303,7 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not cron_authorized(auth, str(data.get("secret") or "")):
                 self._html(401, _shell("Unauthorized", "<p>Missing or invalid CRON_SECRET.</p>"))
                 return
-            result = run_due_emails(dry_run=str(data.get("dry_run") or "") in {"1", "true", "yes"})
+            result = _run_due(dry_run=str(data.get("dry_run") or "") in {"1", "true", "yes"})
             raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
             self.send_response(200 if result.get("ok") else 500)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -962,9 +963,14 @@ def _list_page(rows: list[dict], *, message: str = "", ok: bool = True) -> str:
             when = str(row.get("created_at") or "")
             checkin = str(fields.get("checkin_date") or "")
             cid = str(row.get("id") or "")
-            siba = "SIBA sent" if row.get("siba_sent_at") else (
-                "SIBA pending" if is_foreign_guest(fields) else "PRT — no SIBA"
-            )
+            if row.get("siba_sent_at"):
+                siba = "SIBA sent"
+            elif not is_foreign_guest(fields):
+                siba = "PRT — no SIBA"
+            elif entry_is_due(fields):
+                siba = "SIBA pending"
+            else:
+                siba = "SIBA on check-in day"
             parts.append(
                 '<li class="list-row">'
                 '<div class="meta">'
@@ -1211,6 +1217,64 @@ def _siba_panel(record: dict) -> str:
     """
 
 
+def _run_due(*, dry_run: bool) -> dict:
+    """Guest-link emails, then SIBA for foreign guests whose check-in day has arrived."""
+    result = run_due_emails(dry_run=dry_run)
+    siba = _send_due_siba(dry_run=dry_run)
+    result["siba"] = siba
+    if not siba.get("ok"):
+        result["ok"] = False
+    return result
+
+
+def _due_message(result: dict) -> str:
+    text = result_message(result)
+    siba = result.get("siba") or {}
+    text += (
+        f" SIBA: {len(siba.get('sent') or [])} sent,"
+        f" {len(siba.get('waiting') or [])} waiting for check-in day,"
+        f" {len(siba.get('failed') or [])} failed."
+    )
+    if siba.get("error"):
+        text += " " + str(siba["error"])
+    return text
+
+
+def _send_due_siba(*, dry_run: bool) -> dict:
+    """Send saved foreign bulletins once the entry date is today or earlier."""
+    problem = siba_ready()
+    if problem:
+        return {"ok": False, "error": problem, "sent": [], "waiting": [], "failed": []}
+    sent: list[str] = []
+    waiting: list[str] = []
+    failed: list[str] = []
+    for row in store.list_checkins(limit=10_000):
+        if row.get("siba_sent_at"):
+            continue
+        fields = dict(row.get("fields") or {})
+        if not is_foreign_guest(fields):
+            continue
+        name = " ".join(
+            part for part in (fields.get("given_name") or "", fields.get("surname") or "") if part
+        ).strip() or str(row.get("id") or "guest")
+        if not entry_is_due(fields):
+            waiting.append(name)
+            continue
+        if dry_run:
+            sent.append(f"{name}: would send")
+            continue
+        try:
+            file_number = store.next_siba_file_number()
+            result = send_checkin(fields, file_number=file_number)
+            store.mark_siba_sent(str(row.get("id") or ""), file_number=file_number, result=result)
+            sent.append(name)
+            print(f"SIBA due ok {row.get('id')} file {file_number}.", flush=True)
+        except SibaError as exc:
+            failed.append(f"{name}: {exc}")
+            print(f"SIBA due fail {row.get('id')}: {exc}", flush=True)
+    return {"ok": not failed, "error": "", "sent": sent, "waiting": waiting, "failed": failed}
+
+
 def _send_siba(checkin_id: str) -> tuple[dict | None, str, bool]:
     record = store.get_checkin(checkin_id)
     if record is None:
@@ -1218,6 +1282,9 @@ def _send_siba(checkin_id: str) -> tuple[dict | None, str, bool]:
     if record.get("siba_sent_at"):
         return record, "Already sent to SIBA.", True
     fields = dict(record.get("fields") or {})
+    if is_foreign_guest(fields) and not entry_is_due(fields):
+        arrival = str(fields.get("checkin_date") or "").strip()[:10] or "the check-in day"
+        return record, f"SIBA waits until {arrival}. A future entry date is refused.", True
     try:
         file_number = store.next_siba_file_number()
         result = send_checkin(fields, file_number=file_number)
@@ -1248,6 +1315,8 @@ def _save_and_maybe_siba(
         return record, ""
     if not is_foreign_guest(fields):
         return record, "prt_skip"
+    if not entry_is_due(fields):
+        return record, "wait"
     try:
         file_number = store.next_siba_file_number()
         result = send_checkin(fields, file_number=file_number)
@@ -1347,7 +1416,7 @@ def _guest_form_page(
         </div>
       </div>
       <button type="submit">Submit check-in</button>
-      <p class="note">Foreign guests are sent to SIBA / AIMA automatically after submit.</p>
+      <p class="note">Foreign guests are sent to SIBA / AIMA on the check-in day. A form filled earlier waits until that day.</p>
     </form>
     """
     return _shell("Online check-in — Whatelse Guest House", body)
@@ -1362,6 +1431,8 @@ def _guest_done_page(link: dict, *, already: bool, siba_note: str = "") -> str:
             msg += " Registration was sent to the Portuguese authorities (SIBA/AIMA)."
         elif siba_note == "prt_skip":
             msg += " Portuguese nationality — SIBA send is not required."
+        elif siba_note == "wait":
+            msg += " Registration will be sent to the Portuguese authorities on the check-in day."
         elif siba_note.startswith("fail:"):
             msg += " The hotel will finish the authority registration if needed."
     body = f"""

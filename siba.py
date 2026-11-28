@@ -29,6 +29,20 @@ def is_foreign_guest(fields: dict) -> bool:
     return bool(nationality) and nationality != "PRT"
 
 
+def entry_is_due(fields: dict, today: date | None = None) -> bool:
+    """True when the check-in date is today or earlier (Lisbon).
+
+    SIBA error 42 refuses an entry date that is still in the future.
+    """
+    raw = str(fields.get("checkin_date") or "").strip()[:10]
+    try:
+        arrival = date.fromisoformat(raw)
+    except ValueError:
+        return False
+    day = today or datetime.now(LISBON).date()
+    return arrival <= day
+
+
 def send_checkin(fields: dict, *, file_number: int) -> str:
     """
     Send one guest boletim. Returns '0' on success.
